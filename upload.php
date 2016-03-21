@@ -1,5 +1,7 @@
 <?php
 
+$is_authenticate = false;
+
 require_once('rl_init.php');
 ignore_user_abort(true);
 
@@ -8,13 +10,138 @@ login_check();
 include(CLASS_DIR.'http.php');
 
 if(!defined('CRLF')) define('CRLF',"\r\n");
-$_REQUEST['filename']=base64_decode($_REQUEST['filename']);
 
-// Check if requested upload file is within our $options['download_dir']
-// We put basename() because we are quite sure that no one is able to upload things besides the download directory normally
-// htmlentities() prevents XSS attacks
-$_REQUEST['filename'] = htmlentities($options['download_dir'].basename($_REQUEST['filename']));
+if(isset($_REQUEST['filename']))
+{
+    $_REQUEST['filename'] = base64_decode($_REQUEST['filename']);
+    
+    // Check if requested upload file is within our $options['download_dir']
+    // We put basename() because we are quite sure that no one is able to upload things besides the download directory normally
+    // htmlentities() prevents XSS attacks
+    $_REQUEST['filename'] = htmlentities($options['download_dir'].basename($_REQUEST['filename']));
+}
 $_REQUEST['uploaded'] = htmlentities($_REQUEST['uploaded']);
+
+if(isset($_REQUEST['state']))
+{
+    /* 
+    $_REQUEST['state']=base64_decode($_REQUEST['state']);
+    $stateString = json_decode($_REQUEST['state'], true);
+    if(!isset($stateString)) $_REQUEST['filename'] = json_last_error_msg ();
+    if(isset($stateString['filename'])) $_REQUEST['filename'] = $stateString['filename'];
+    if(isset($stateString['uproxy'])) $_REQUEST['uproxy'] = $stateString['uproxy'];
+    if(isset($stateString['uproxyuser'])) $_REQUEST['uproxyuser'] = $stateString['uproxyuser'];
+    if(isset($stateString['uproxypass'])) $_REQUEST['uproxypass'] = $stateString['uproxypass']; 
+    */
+    $_REQUEST['filename'] = base64_decode($_REQUEST['state']);
+}
+
+// Call set_include_path() as needed to point to your client library.
+set_include_path(ROOT_DIR .'\lib\google-api-php-client-1-master\src');
+require_once 'Google/autoload.php';
+require_once 'Google/Client.php';
+require_once 'Google/Service/YouTube.php';
+
+
+//(include_path='C:/wamp/wwwC:\wamp\www\rapidleechlib/google-api-php-client-1-master/src') in
+
+
+$key = file_get_contents('apiconf.json');
+$keys = json_decode($key, true);
+
+/*
+ * You can acquire an OAuth 2.0 client ID and client secret from the
+ * {{ Google Cloud Console }} <{{ https://cloud.google.com/console }}>
+ * For more information about using OAuth 2.0 to access Google APIs, please see:
+ * <https://developers.google.com/youtube/v3/guides/authentication>
+ * Please ensure that you have enabled the YouTube Data API for your project.
+ */
+$OAUTH2_CLIENT_ID = $keys['CLIENT_ID'] . ".apps.googleusercontent.com";
+$OAUTH2_CLIENT_SECRET = $keys['CLIENT_SECRET'];
+$REDIRECT = 'http://localhost/rapidleech/upload.php?uploaded=youtubev3.com';
+$APPNAME = "RapidLeechYoutubeUploaded";
+
+try{
+
+    $client = new Google_Client();
+    $client->setClientId($OAUTH2_CLIENT_ID);
+    $client->setClientSecret($OAUTH2_CLIENT_SECRET);
+    $client->setScopes('https://www.googleapis.com/auth/youtube');
+    $client->setRedirectUri($REDIRECT);
+    $client->setApplicationName($APPNAME);
+    $client->setAccessType('offline');
+    if(isset($_COOKIE["accessToken"]) && !empty($_COOKIE["accessToken"]))
+        $client->setAccessToken($_COOKIE["accessToken"]);
+    else
+    {
+        //$state = base64UrlEncode("{'uproxy':".$_REQUEST['uproxy'].",'uproxyuser':".$_REQUEST['uproxyuser'].",'uproxypass':".$_REQUEST['uproxypass'].", 'filename' : ".$_REQUEST['filename']."}");
+        $state = base64_decode($_REQUEST['filename']);
+        $client->setState($state);
+        $_SESSION['state'] = $state;
+        header('Location: ' . filter_var($client->createAuthUrl(), FILTER_SANITIZE_URL));
+    }
+
+    // Define an object that will be used to make all API requests.
+    $youtube = new Google_Service_YouTube($client);
+
+    if ($client->getAccessToken()) 
+    {
+        //Check to see if our access token has expired. If so, get a new one and save it to file for future use.
+        if($client->isAccessTokenExpired()) {
+            $newToken = json_decode($client->getAccessToken());
+            if(isset($newToken->refresh_token) && !empty($newToken->refresh_token))
+            {
+                $client->refreshToken($newToken->refresh_token);
+                setcookie("accessToken",$client->getAccessToken(),time()+ (365*24*3600));
+            }
+            else
+            {
+                //$state = base64UrlEncode("{'uproxy':".$_REQUEST['uproxy'].",'uproxyuser':".$_REQUEST['uproxyuser'].",'uproxypass':".$_REQUEST['uproxypass'].", 'filename' : ".$_REQUEST['filename']."}");
+                $state = base64UrlEncode($_REQUEST['filename']);
+                $client->setState($state);
+                $_SESSION['state'] = $state;
+                header('Location: ' . filter_var($client->createAuthUrl(), FILTER_SANITIZE_URL));
+            }
+        }
+    }
+    else
+    {
+        if (isset($_GET['code'])) {
+            //if (strval($_SESSION['savestate']) !== strval($_GET['state'])) {
+            //    die('The session state ('.$_SESSION['savestate'].') did not match ('.$_GET['state'].').');
+            //}
+            $client->authenticate($_GET['code']);
+            $_SESSION['token'] = $client->getAccessToken();
+        }
+
+        if (isset($_SESSION['token'])) {
+            $client->setAccessToken($_SESSION['token']);
+            setcookie("accessToken",$client->getAccessToken(),time()+ (365*24*3600));
+        }
+    }
+
+    // Check to ensure that the access token was successfully acquired.
+    if ($client->getAccessToken()) {
+        $is_authenticate = true;
+    }
+    else
+    { 
+        //$state = base64UrlEncode("{'uproxy':".$_REQUEST['uproxy'].",'uproxyuser':".$_REQUEST['uproxyuser'].",'uproxypass':".$_REQUEST['uproxypass'].", 'filename' : ".$_REQUEST['filename']."}");
+        $state = base64UrlEncode($_REQUEST['filename']);
+        $client->setState($state);
+        $_SESSION['state'] = $state;
+    }
+}
+catch(Google_Service_Exception $e) {
+    print "Caught Google service Exception ".$e->getCode(). " message is ".$e->getMessage();
+    print "Stack trace is ".$e->getTraceAsString();
+}
+catch (Exception $e) {
+    print "Caught Google service Exception ".$e->getCode(). " message is ".$e->getMessage();
+    print "Stack trace is ".$e->getTraceAsString();
+}
+
+
 // We want to check if the selected upload service is a valid ones
 $d = opendir ( HOST_DIR . "upload/" );
 while ( false !== ($modules = readdir ( $d )) ) {
@@ -34,21 +161,21 @@ require(TEMPLATE_DIR.'/header.php');
 ?>
 <?php
 if (!file_exists($_REQUEST['filename']))
-	{
-		html_error(sprintf(lang(64),$_REQUEST['filename']));
-	}
+{
+    html_error(sprintf(lang(64),$_REQUEST['filename']));
+}
 
 if (is_readable($_REQUEST['filename']))
-	{
-		$lfile=$_REQUEST['filename'];
-		$lname=basename($lfile);
-	}
-		else
-	{
-		html_error(sprintf(lang(65),$filename));
-	}
+{
+    $lfile=$_REQUEST['filename'];
+    $lname=basename($lfile);
+}
+else
+{
+    html_error(sprintf(lang(65),$filename));
+}
 
-	$_GET['proxy'] = isset($_GET['proxy']) ? $_GET['proxy'] : ''; // EDIT HERE
+$_GET['proxy'] = isset($_GET['proxy']) ? $_GET['proxy'] : ''; // EDIT HERE
 
 if (isset ( $_REQUEST ["useuproxy"] ) && (empty($_REQUEST ["uproxy"]) || ! strstr ( $_REQUEST ["uproxy"], ":" )))
 {
@@ -82,35 +209,35 @@ if (file_exists("hosts/upload/".$_REQUEST['uploaded'].".php")){
 else html_error(lang(67));
 
 if (!empty($download_link) || !empty($delete_link) || !empty($stat_link) || !empty($adm_link))
-	{
-			//Protect down link with http://lix.in/
-			/*
-			if ($_REQUEST['protect']==1){
-				unset($post);
-				$post['url'] =$download_link;
-				$post['button'] = 'Protect+Link';
-				$post['op'] = 'crypt_single';
-				$post['reset']='Clear';
-				$page = geturl("lix.in",80,"/index.php","http://lix.in/",0,$post);
-				$tmp = cut_str($page,"http://lix.in/","'");
-				if (!empty($tmp)) $protect = "http://lix.in/".$tmp;
-			}
-			*/
+{
+    //Protect down link with http://lix.in/
+    /*
+    if ($_REQUEST['protect']==1){
+    unset($post);
+    $post['url'] =$download_link;
+    $post['button'] = 'Protect+Link';
+    $post['op'] = 'crypt_single';
+    $post['reset']='Clear';
+    $page = geturl("lix.in",80,"/index.php","http://lix.in/",0,$post);
+    $tmp = cut_str($page,"http://lix.in/","'");
+    if (!empty($tmp)) $protect = "http://lix.in/".$tmp;
+    }
+     */
 
-			echo "\n<table width=100% border=0>";
-			echo (!empty($download_link) ? '<tr><td width="100" nowrap="nowrap" align="right"><b>'.lang(68).':</b><td width="80%"><input value="'.htmlspecialchars($download_link).'" class="upstyles-dllink" readonly="readonly" /></tr>' : '');
-			echo (!empty($delete_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(69).':<td width="80%"><input value="'.htmlspecialchars($delete_link).'" class="upstyles-dellink" readonly="readonly" /></tr>' : '');
-			echo (!empty($stat_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(70).':<td width="80%"><input value="'.htmlspecialchars($stat_link).'" class="upstyles-statlink" readonly="readonly" /></tr>' : '');
-			echo (!empty($adm_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(71).':<td width="80%"><input value="'.htmlspecialchars($adm_link).'" class="upstyles-admlink" readonly="readonly" /></tr>': '');
-			echo (!empty($user_id) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(72).':<td width="80%"><input value="'.htmlspecialchars($user_id).'" class="upstyles-userid" readonly="readonly" /></tr>': '');
-			echo (!empty($ftp_uplink) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(73).':<td width="80%"><input value="'.htmlspecialchars($ftp_uplink).'" class="upstyles-ftpuplink" readonly="readonly" /></tr>': '');
-			echo (!empty($access_pass) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(74).':<td width="80%"><input value="'.htmlspecialchars($access_pass).'" class="upstyles-accesspass" readonly="readonly" /></tr>': '');
-			/*echo ($protect ? '<tr><td width="100" nowrap="nowrap" align="right">Protect link:<td width="80%"><input value="'.htmlspecialchars($protect).'" style="width:470px; border: 1px solid #55AAFF; background-color: #FFFFFF; padding:3px" readonly /></tr>': '');*/
-			echo "</table>\n";
+    echo "\n<table width=100% border=0>";
+    echo (!empty($download_link) ? '<tr><td width="100" nowrap="nowrap" align="right"><b>'.lang(68).':</b><td width="80%"><input value="'.htmlspecialchars($download_link).'" class="upstyles-dllink" readonly="readonly" /></tr>' : '');
+    echo (!empty($delete_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(69).':<td width="80%"><input value="'.htmlspecialchars($delete_link).'" class="upstyles-dellink" readonly="readonly" /></tr>' : '');
+    echo (!empty($stat_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(70).':<td width="80%"><input value="'.htmlspecialchars($stat_link).'" class="upstyles-statlink" readonly="readonly" /></tr>' : '');
+    echo (!empty($adm_link) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(71).':<td width="80%"><input value="'.htmlspecialchars($adm_link).'" class="upstyles-admlink" readonly="readonly" /></tr>': '');
+    echo (!empty($user_id) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(72).':<td width="80%"><input value="'.htmlspecialchars($user_id).'" class="upstyles-userid" readonly="readonly" /></tr>': '');
+    echo (!empty($ftp_uplink) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(73).':<td width="80%"><input value="'.htmlspecialchars($ftp_uplink).'" class="upstyles-ftpuplink" readonly="readonly" /></tr>': '');
+    echo (!empty($access_pass) ? '<tr><td width="100" nowrap="nowrap" align="right">'.lang(74).':<td width="80%"><input value="'.htmlspecialchars($access_pass).'" class="upstyles-accesspass" readonly="readonly" /></tr>': '');
+    /*echo ($protect ? '<tr><td width="100" nowrap="nowrap" align="right">Protect link:<td width="80%"><input value="'.htmlspecialchars($protect).'" style="width:470px; border: 1px solid #55AAFF; background-color: #FFFFFF; padding:3px" readonly /></tr>': '');*/
+    echo "</table>\n";
 
-			if(!file_exists(trim($lfile).".upload.html") && !isset($_GET['auul']) && !$options['upload_html_disable'])
-			  {
-				$html_header = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+    if(!file_exists(trim($lfile).".upload.html") && !isset($_GET['auul']) && !$options['upload_html_disable'])
+    {
+        $html_header = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 								<html xmlns="http://www.w3.org/1999/xhtml">
 								<head>
 								<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
@@ -212,22 +339,22 @@ hr {
 								</head>
 								<body>
 								';
-			write_file(trim($lfile).".upload.html", $html_header.sprintf(lang(76),$lname,bytesToKbOrMb($fsize)), 0);
-			if (!$options['upload_html_disable']) {
-				$html_content = '<div class="host"><div class="title"><strong>'.$_REQUEST['uploaded'].'</strong> - <span class="bluefont">'.date("Y-m-d H:i:s").'</span></div>
+        write_file(trim($lfile).".upload.html", $html_header.sprintf(lang(76),$lname,bytesToKbOrMb($fsize)), 0);
+        if (!$options['upload_html_disable']) {
+            $html_content = '<div class="host"><div class="title"><strong>'.$_REQUEST['uploaded'].'</strong> - <span class="bluefont">'.date("Y-m-d H:i:s").'</span></div>
 				<div class="links">'.
-				(!empty($download_link) ? '<strong>'.lang(68).': <a href="'.htmlspecialchars($download_link).'" target="_blank">'.htmlspecialchars($download_link).' </a></strong>' : '').
-				(!empty($delete_link) ? '<br />'.lang(69).': <a href="'.htmlspecialchars($delete_link).'" target="_blank">'.htmlspecialchars($delete_link).' </a>' : '').
-				(!empty($stat_link) ? '<br />'.lang(70).': <a href="'.htmlspecialchars($stat_link).'" target="_blank">'.htmlspecialchars($stat_link).' </a>' : '').
-				(!empty($adm_link) ? '<br />'.lang(71).': <a href="'.htmlspecialchars($adm_link).'" target="_blank">'.htmlspecialchars($adm_link).' </a>' : '').
-				(!empty($user_id) ? '<br />'.lang(72).': <a href="'.htmlspecialchars($user_id).'" target="_blank">'.htmlspecialchars($user_id).' </a>' : '').
-				(!empty($access_pass) ? '<br />'.lang(74).': <a href="'.htmlspecialchars($access_pass).'" target="_blank">'.htmlspecialchars($access_pass).' </a>' : '').
-				(!empty($ftp_uplink) ? '<br />'.lang(73).': <a href="'.htmlspecialchars($ftp_uplink).'" target="_blank">'.htmlspecialchars($ftp_uplink).' </a>' : '').
-				'</div></div>';
-				write_file(trim($lfile).".upload.html", $html_content, 0);
-			}
-		}
-	}
+            (!empty($download_link) ? '<strong>'.lang(68).': <a href="'.htmlspecialchars($download_link).'" target="_blank">'.htmlspecialchars($download_link).' </a></strong>' : '').
+            (!empty($delete_link) ? '<br />'.lang(69).': <a href="'.htmlspecialchars($delete_link).'" target="_blank">'.htmlspecialchars($delete_link).' </a>' : '').
+            (!empty($stat_link) ? '<br />'.lang(70).': <a href="'.htmlspecialchars($stat_link).'" target="_blank">'.htmlspecialchars($stat_link).' </a>' : '').
+            (!empty($adm_link) ? '<br />'.lang(71).': <a href="'.htmlspecialchars($adm_link).'" target="_blank">'.htmlspecialchars($adm_link).' </a>' : '').
+            (!empty($user_id) ? '<br />'.lang(72).': <a href="'.htmlspecialchars($user_id).'" target="_blank">'.htmlspecialchars($user_id).' </a>' : '').
+            (!empty($access_pass) ? '<br />'.lang(74).': <a href="'.htmlspecialchars($access_pass).'" target="_blank">'.htmlspecialchars($access_pass).' </a>' : '').
+            (!empty($ftp_uplink) ? '<br />'.lang(73).': <a href="'.htmlspecialchars($ftp_uplink).'" target="_blank">'.htmlspecialchars($ftp_uplink).' </a>' : '').
+            '</div></div>';
+            write_file(trim($lfile).".upload.html", $html_content, 0);
+        }
+    }
+}
 echo $not_done ? "" : '<p><center><b><a href="javascript:window.close();">'.lang(77).'</a></b></center>';
 ?>
 </body>
@@ -238,7 +365,7 @@ if (isset($_GET['auul'])) {
 	// Write links to a file
 	$file = DOWNLOAD_DIR.'myuploads.txt';	// Obviously it was a mistake not making it a variable earlier
 	if (!$options['myuploads_disable']) {
-		if (empty($_GET['save_style']) || $_GET['save_style'] == lang(51)) {
+		if (!isset($_GET['save_style']) || $_GET['save_style'] !== lang(51)) {
 			$dash = "";
 			for ($i=0;$i<=80;$i++) $dash.="=";
 			write_file($file, "$lname$nn$dash$nn$download_link$nn$nn", 0);
